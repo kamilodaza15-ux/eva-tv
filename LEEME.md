@@ -17,6 +17,7 @@ App de TV para tu Android TV con la lista gratuita de canales de Colombia (iptv-
 - OK / Flecha izquierda / Menu: abre la lista de canales
 - Flecha arriba / abajo: siguiente / anterior canal
 - En el menu: flecha izquierda / derecha cambia de seccion (Colombia, Peliculas)
+- Buscar: en el menu sube hasta el cuadro "Buscar…" (o el boton de busqueda del control), escribe y busca en todas las secciones
 - Atras: cierra la lista (o sale de la app)
 
 ## Personalizar

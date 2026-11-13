@@ -1,7 +1,13 @@
 package com.evatv
 
 import android.app.Activity
+import android.content.Context
 import android.os.Bundle
+import android.text.Editable
+import android.text.TextWatcher
+import android.view.inputmethod.InputMethodManager
+import android.widget.EditText
+import java.text.Normalizer
 import android.os.Handler
 import android.os.Looper
 import android.view.KeyEvent
@@ -43,6 +49,8 @@ class MainActivity : Activity() {
     private lateinit var panel: View
     private lateinit var list: ListView
     private lateinit var sectionTitle: TextView
+    private lateinit var search: EditText
+    private var hits: List<Pair<Int, Int>>? = null  // (seccion, indice) de la busqueda
 
     private var player: ExoPlayer? = null
     private var sections: List<Section> = emptyList()
@@ -65,9 +73,31 @@ class MainActivity : Activity() {
         panel = findViewById(R.id.panel)
         list = findViewById(R.id.list)
         sectionTitle = findViewById(R.id.sectionTitle)
+        search = findViewById(R.id.search)
+        search.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, st: Int, c: Int, a: Int) {}
+            override fun onTextChanged(s: CharSequence?, st: Int, b: Int, c: Int) {}
+            override fun afterTextChanged(s: Editable?) {
+                applyQuery(s?.toString() ?: "")
+            }
+        })
+        search.setOnEditorActionListener { _, _, _ ->
+            hideKeyboard()
+            list.requestFocus()
+            true
+        }
         list.setOnItemClickListener { _, _, pos, _ ->
-            sec = browse
-            play(pos)
+            val h = hits
+            if (h != null) {
+                val hit = h.getOrNull(pos) ?: return@setOnItemClickListener
+                sec = hit.first
+                play(hit.second)
+                search.setText("")
+            } else {
+                sec = browse
+                play(pos)
+            }
+            hideKeyboard()
             hidePanel()
         }
         loadChannels()
@@ -218,6 +248,37 @@ class MainActivity : Activity() {
         sectionTitle.text = if (sections.size > 1) "‹  ${sc.name}  ›" else sc.name
     }
 
+    // ---------- Busqueda ----------
+
+    private fun norm(s: String): String =
+        Normalizer.normalize(s, Normalizer.Form.NFD).replace(Regex("\\p{M}+"), "").lowercase()
+
+    private fun applyQuery(q: String) {
+        val t = norm(q.trim())
+        if (t.isEmpty()) {
+            hits = null
+            refreshList()
+            return
+        }
+        val out = ArrayList<Pair<Int, Int>>()
+        for ((si, sc) in sections.withIndex()) {
+            for ((ci, ch) in sc.channels.withIndex()) {
+                if (norm(ch.name).contains(t)) out.add(Pair(si, ci))
+            }
+        }
+        hits = out
+        val names = out.map {
+            "${sections[it.first].channels[it.second].name}  ·  ${sections[it.first].name}"
+        }
+        list.adapter = ArrayAdapter(this, R.layout.item_channel, names)
+        sectionTitle.text = "Resultados (${out.size})"
+    }
+
+    private fun hideKeyboard() {
+        val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+        imm.hideSoftInputFromWindow(search.windowToken, 0)
+    }
+
     // ---------- Reproduccion ----------
 
     private fun play(i: Int) {
@@ -250,6 +311,7 @@ class MainActivity : Activity() {
 
     private fun showPanel() {
         browse = sec
+        search.setText("")
         refreshList()
         panel.visibility = View.VISIBLE
         list.requestFocus()
@@ -261,7 +323,7 @@ class MainActivity : Activity() {
     }
 
     private fun switchSection(d: Int) {
-        if (sections.size < 2) return
+        if (sections.size < 2 || hits != null) return
         browse = (browse + d + sections.size) % sections.size
         refreshList()
         val sel = if (browse == sec && current >= 0) current else 0
@@ -275,15 +337,22 @@ class MainActivity : Activity() {
 
     override fun dispatchKeyEvent(e: KeyEvent): Boolean {
         if (e.action != KeyEvent.ACTION_DOWN) return super.dispatchKeyEvent(e)
+        if (e.keyCode == KeyEvent.KEYCODE_SEARCH) {
+            if (panel.visibility != View.VISIBLE) showPanel()
+            search.requestFocus()
+            return true
+        }
         if (panel.visibility == View.VISIBLE) {
-            when (e.keyCode) {
-                KeyEvent.KEYCODE_DPAD_LEFT -> {
-                    switchSection(-1)
-                    return true
-                }
-                KeyEvent.KEYCODE_DPAD_RIGHT -> {
-                    switchSection(1)
-                    return true
+            if (list.hasFocus()) {
+                when (e.keyCode) {
+                    KeyEvent.KEYCODE_DPAD_LEFT -> {
+                        switchSection(-1)
+                        return true
+                    }
+                    KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                        switchSection(1)
+                        return true
+                    }
                 }
             }
             return super.dispatchKeyEvent(e)
