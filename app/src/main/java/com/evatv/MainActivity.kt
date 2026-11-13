@@ -261,6 +261,7 @@ class MainActivity : Activity() {
 
         fav = loadFav()
         loadHealth()
+        handler.postDelayed({ autoCheckUpdate() }, 6000)
         handler.postDelayed(bgTick, 90_000)   // revision silenciosa mientras la app esta abierta
         File(cacheDir, "update.apk").delete()   // ya se instalo: no dejar el archivo ocupando espacio
         showSection(1)
@@ -877,6 +878,25 @@ class MainActivity : Activity() {
                 saveHealth()
                 cleanMsg = "Listo: todos los canales vuelven a salir"
                 rebuildData()
+            }
+        }
+    }
+
+    /** Al abrir la app: busca version nueva y, si hay, pregunta si instalar. */
+    private fun autoCheckUpdate() {
+        thread {
+            val v = try { download(updBase + "version.txt").trim().toInt() } catch (e: Exception) { return@thread }
+            if (v <= installedCode()) return@thread
+            runOnUiThread {
+                if (isFinishing) return@runOnUiThread
+                updNew = v
+                updMsg = "¡Hay una versión nueva!"
+                android.app.AlertDialog.Builder(this)
+                    .setTitle("Actualización disponible")
+                    .setMessage("Hay una versión nueva de EVA TV. ¿Quieres instalarla ahora?")
+                    .setPositiveButton("Instalar") { _, _ -> downloadAndInstall() }
+                    .setNegativeButton("Después", null)
+                    .show()
             }
         }
     }
