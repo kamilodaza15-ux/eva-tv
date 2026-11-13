@@ -159,6 +159,7 @@ class MainActivity : Activity() {
     private val rawData = HashMap<Int, List<Channel>>()    // listas completas
     private val health = HashMap<String, Long>()           // url -> cuando se detecto caido
     private var cleaning = false
+    @Volatile private var loadedCount = 0
     private var cleanMsg = ""
     private var fav: MutableList<Channel> = ArrayList()
     private var shown: List<Channel> = emptyList()
@@ -363,6 +364,7 @@ class MainActivity : Activity() {
 
     private fun onLoaded(i: Int, raw: List<Channel>) {
         rawData[i] = raw
+        loadedCount++
         val res = filterDead(raw)
         data[i] = res
         if (menuIndex == i + 1) {
@@ -728,6 +730,15 @@ class MainActivity : Activity() {
                 finishClean("Sin internet. Intenta de nuevo")
                 return@thread
             }
+            var waited = 0
+            while (loadedCount < sources.size && waited < 120) {
+                runOnUiThread {
+                    cleanMsg = "Esperando que carguen todas las listas (${loadedCount} de ${sources.size})…"
+                    if (menuIndex == updIdx) showUpdate()
+                }
+                Thread.sleep(1000)
+                waited++
+            }
             val all = LinkedHashMap<String, Channel>()
             for ((_, l) in rawData) for (ch in l) if (ch.url.isNotEmpty()) all.putIfAbsent(ch.url, ch)
             val todo = all.values.toList()
@@ -767,7 +778,12 @@ class MainActivity : Activity() {
                 for ((u, t) in deadNow) health[u] = t
                 saveHealth()
                 cleaning = false
-                cleanMsg = "Listo: oculté ${deadNow.size} de $total canales que no cargan"
+                val parts = ArrayList<String>()
+                for ((i, src) in sources.withIndex()) {
+                    val n = rawData[i]?.count { it.url.isNotEmpty() && deadNow.containsKey(it.url) } ?: 0
+                    if (n > 0) parts.add("${src.name} $n")
+                }
+                cleanMsg = "Listo: oculté ${deadNow.size} de $total (" + parts.joinToString(", ") + ")"
                 rebuildData()
             }
         }
