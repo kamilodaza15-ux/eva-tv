@@ -1,0 +1,6 @@
+#EXTM3U
+# Aqui puedes agregar tus propios canales (legales). Salen primero en la lista.
+# Formato: una linea #EXTINF y debajo la URL del stream .m3u8
+# Ejemplo (quita el # de las dos lineas para activarlo):
+#EXTINF:-1 group-title="Mis canales",Mi Canal
+#https://ejemplo.com/canal/index.m3u8

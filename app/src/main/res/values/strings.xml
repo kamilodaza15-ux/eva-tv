@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Nombre de tu TV (sale en el launcher y en el menu de canales) -->
+    <string name="app_name">EVA TV</string>
+    <!-- Lista de canales de Colombia (iptv-org). Cambiala si quieres otra lista -->
+    <string name="playlist_url" translatable="false">https://iptv-org.github.io/iptv/countries/co.m3u</string>
+    <string name="loading">Cargando canales…</string>
+    <string name="no_channels">No se pudieron cargar los canales. Revisa el internet del TV.</string>
+</resources>
