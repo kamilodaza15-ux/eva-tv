@@ -107,6 +107,7 @@ class MainActivity : Activity() {
         listOf(
             Src("Colombia", listOf(Pair(getString(R.string.playlist_url), false))),
             Src("Canales", listOf(Pair(base + "languages/spa.m3u", false))),
+            Src("Deportes", listOf(Pair(base + "categories/sports.m3u", false))),
             Src(
                 "Películas",
                 listOf(Pair(base + "languages/spa.m3u", true), Pair(base + "categories/movies.m3u", false))
@@ -184,11 +185,16 @@ class MainActivity : Activity() {
 
         list.setOnItemClickListener { _, _, pos, _ ->
             val ch = shown.getOrNull(pos) ?: return@setOnItemClickListener
-            if (playing?.url == ch.url && player != null) enterFullscreen()
-            else play(shown, pos)
+            if (ch.url.isEmpty()) return@setOnItemClickListener
+            if (playing?.url == ch.url && player != null) {
+                enterFullscreen()
+            } else {
+                val pl = shown.filter { it.url.isNotEmpty() }
+                play(pl, pl.indexOfFirst { it.url == ch.url })
+            }
         }
         list.setOnItemLongClickListener { _, _, pos, _ ->
-            shown.getOrNull(pos)?.let { toggleFav(it) }
+            shown.getOrNull(pos)?.let { if (it.url.isNotEmpty()) toggleFav(it) }
             true
         }
         previewBox.setOnClickListener { if (playing != null) enterFullscreen() }
@@ -254,6 +260,9 @@ class MainActivity : Activity() {
         "cr", "pa", "do", "gt", "sv", "hn", "ni", "cu", "pr"
     )
 
+    /** Fila de titulo dentro de una lista (sin url, no se puede seleccionar). */
+    private fun header(t: String) = Channel("—  $t  —", "", "", null, null, null)
+
     private fun isSpanishId(id: String?): Boolean {
         if (id == null) return false
         val code = id.substringBefore("@").substringAfterLast(".", "").lowercase()
@@ -290,7 +299,10 @@ class MainActivity : Activity() {
                 if (i >= 2) {
                     // solo canales en espanol: de la lista de idioma espanol o de paises hispanos
                     val es = res.filter { it.url in spaUrls || isSpanishId(it.tvgId) }
-                    if (es.isNotEmpty()) res = es
+                    val otros = res.filter { !(it.url in spaUrls || isSpanishId(it.tvgId)) }
+                    if (es.isNotEmpty() && otros.isNotEmpty()) {
+                        res = listOf(header("En español")) + es + listOf(header("Otros idiomas")) + otros
+                    }
                 }
                 runOnUiThread { if (!isFinishing) onLoaded(i, res) }
             }
@@ -463,6 +475,7 @@ class MainActivity : Activity() {
             val seen = HashSet<String>()
             for (k in data.keys.sorted()) {
                 for (ch in data[k] ?: emptyList()) {
+                    if (ch.url.isEmpty()) continue
                     if (norm(ch.name).contains(t) && seen.add(ch.url)) out.add(ch)
                 }
             }
@@ -485,13 +498,28 @@ class MainActivity : Activity() {
         override fun getCount() = items.size
         override fun getItem(position: Int) = items[position]
         override fun getItemId(position: Int) = position.toLong()
+        override fun areAllItemsEnabled() = false
+        override fun isEnabled(position: Int) = items[position].url.isNotEmpty()
         override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
             val v = convertView ?: layoutInflater.inflate(R.layout.item_channel, parent, false)
             val ch = items[position]
-            val star = if (fav.any { it.url == ch.url }) "★ " else ""
-            val mark = if (playing?.url == ch.url) "► " else ""
-            v.findViewById<TextView>(R.id.name).text = mark + star + ch.name
-            Logos.load(v.findViewById(R.id.logo), ch.logo)
+            val nameTv = v.findViewById<TextView>(R.id.name)
+            val logoIv = v.findViewById<ImageView>(R.id.logo)
+            if (ch.url.isEmpty()) {
+                logoIv.visibility = View.GONE
+                logoIv.tag = null
+                nameTv.text = ch.name
+                nameTv.setTextColor(0xFFA8DE78.toInt())
+                nameTv.textSize = 14f
+            } else {
+                val star = if (fav.any { it.url == ch.url }) "★ " else ""
+                val mark = if (playing?.url == ch.url) "► " else ""
+                logoIv.visibility = View.VISIBLE
+                nameTv.setTextColor(0xFFFFFFFF.toInt())
+                nameTv.textSize = 16f
+                nameTv.text = mark + star + ch.name
+                Logos.load(logoIv, ch.logo)
+            }
             return v
         }
     }
@@ -605,7 +633,7 @@ class MainActivity : Activity() {
         }
         if (e.keyCode == KeyEvent.KEYCODE_MENU && list.hasFocus()) {
             val pos = list.selectedItemPosition
-            shown.getOrNull(pos)?.let { toggleFav(it) }
+            shown.getOrNull(pos)?.let { if (it.url.isNotEmpty()) toggleFav(it) }
             return true
         }
         return super.dispatchKeyEvent(e)

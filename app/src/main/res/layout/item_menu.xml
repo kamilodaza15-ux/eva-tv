@@ -5,8 +5,8 @@
     android:background="@drawable/menu_item_bg"
     android:checkMark="@null"
     android:paddingStart="16dp"
-    android:paddingTop="9dp"
+    android:paddingTop="7dp"
     android:paddingEnd="12dp"
-    android:paddingBottom="9dp"
+    android:paddingBottom="7dp"
     android:textColor="#FFFFFFFF"
     android:textSize="17sp" />
