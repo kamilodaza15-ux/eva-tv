@@ -2,6 +2,12 @@ package com.evatv
 
 import android.app.Activity
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.os.Build
+import android.provider.Settings
+import androidx.core.content.FileProvider
+import androidx.core.content.pm.PackageInfoCompat
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.os.Bundle
@@ -128,6 +134,7 @@ class MainActivity : Activity() {
     // Menu: 0 = Buscar, 1..n = secciones, n+1 = Favoritos
     private val searchIdx get() = 0
     private val favIdx get() = sources.size + 1
+    private val updIdx get() = sources.size + 2
 
     private lateinit var labels: List<String>
     private lateinit var playerView: PlayerView
@@ -153,6 +160,9 @@ class MainActivity : Activity() {
     private var playingList: List<Channel> = emptyList()
     private var playingIdx = 0
     private var fullscreen = false
+    private val updBase = "https://github.com/kamilodaza15-ux/eva-tv/releases/download/latest/"
+    private var updMsg = ""
+    private var updNew = 0
     private var pendingMenu: Runnable? = null
     private var pendingSearch: Runnable? = null
     private val handler = Handler(Looper.getMainLooper())
@@ -176,7 +186,7 @@ class MainActivity : Activity() {
         list = findViewById(R.id.list)
         search = findViewById(R.id.search)
 
-        labels = listOf("Buscar") + sources.map { it.name } + listOf("Favoritos")
+        labels = listOf("Buscar") + sources.map { it.name } + listOf("Favoritos", "Actualizar")
         menu.adapter = ArrayAdapter(this, R.layout.item_menu, labels)
         menu.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(p: AdapterView<*>?, v: View?, pos: Int, id: Long) {
@@ -199,6 +209,10 @@ class MainActivity : Activity() {
         list.setOnItemClickListener { _, _, pos, _ ->
             val ch = shown.getOrNull(pos) ?: return@setOnItemClickListener
             if (ch.url.isEmpty()) return@setOnItemClickListener
+            if (ch.url.startsWith("app://")) {
+                handleAction(ch.url)
+                return@setOnItemClickListener
+            }
             if (playing?.url == ch.url && player != null) {
                 enterFullscreen()
             } else {
@@ -207,7 +221,7 @@ class MainActivity : Activity() {
             }
         }
         list.setOnItemLongClickListener { _, _, pos, _ ->
-            shown.getOrNull(pos)?.let { if (it.url.isNotEmpty()) toggleFav(it) }
+            shown.getOrNull(pos)?.let { if (it.url.isNotEmpty() && !it.url.startsWith("app://")) toggleFav(it) }
             true
         }
         previewBox.setOnClickListener { if (playing != null) enterFullscreen() }
@@ -459,6 +473,10 @@ class MainActivity : Activity() {
                 applyQuery(search.text.toString())
                 return
             }
+            idx == updIdx -> {
+                showUpdate()
+                return
+            }
             idx == favIdx -> {
                 shown = fav.toList()
                 listTitle.text =
@@ -529,6 +547,12 @@ class MainActivity : Activity() {
                 nameTv.text = ch.name
                 nameTv.setTextColor(0xFFA8DE78.toInt())
                 nameTv.textSize = 14f
+            } else if (ch.url.startsWith("app://")) {
+                logoIv.visibility = View.GONE
+                logoIv.tag = null
+                nameTv.setTextColor(0xFFFFFFFF.toInt())
+                nameTv.textSize = 18f
+                nameTv.text = ch.name
             } else {
                 val star = if (fav.any { it.url == ch.url }) "★ " else ""
                 val mark = if (playing?.url == ch.url) "► " else ""
@@ -539,6 +563,116 @@ class MainActivity : Activity() {
                 Logos.load(logoIv, ch.logo)
             }
             return v
+        }
+    }
+
+    // ---------- Actualizar la app ----------
+
+    private fun installedCode(): Int = try {
+        PackageInfoCompat.getLongVersionCode(packageManager.getPackageInfo(packageName, 0)).toInt()
+    } catch (e: Exception) {
+        0
+    }
+
+    private fun showUpdate() {
+        val rows = ArrayList<Channel>()
+        rows.add(Channel("Versión instalada: ${installedCode()}", "", "", null, null, null))
+        if (updMsg.isNotEmpty()) rows.add(Channel(updMsg, "", "", null, null, null))
+        rows.add(Channel("Buscar actualización", "", "app://check", null, null, null))
+        if (updNew > installedCode()) {
+            rows.add(Channel("Descargar e instalar la versión $updNew", "", "app://install", null, null, null))
+        }
+        shown = rows
+        listTitle.text = "Actualizar EVA TV"
+        list.adapter = ChannelAdapter(shown)
+    }
+
+    private fun handleAction(a: String) {
+        if (a == "app://check") checkUpdate() else if (a == "app://install") downloadAndInstall()
+    }
+
+    private fun checkUpdate() {
+        updMsg = "Buscando…"
+        showUpdate()
+        thread {
+            var v = 0
+            val msg = try {
+                v = download(updBase + "version.txt").trim().toInt()
+                if (v > installedCode()) "¡Hay una versión nueva!" else "Ya tienes la última versión"
+            } catch (e: Exception) {
+                "No se pudo buscar. Revisa el internet del TV"
+            }
+            runOnUiThread {
+                updNew = v
+                updMsg = msg
+                if (menuIndex == updIdx) showUpdate()
+            }
+        }
+    }
+
+    private fun downloadAndInstall() {
+        if (Build.VERSION.SDK_INT >= 26 && !packageManager.canRequestPackageInstalls()) {
+            showOsd("Activa \"Instalar apps desconocidas\" para EVA TV y vuelve a tocar Instalar", 7000)
+            try {
+                startActivity(
+                    Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName"))
+                )
+            } catch (e: Exception) {
+                // si el TV no tiene esa pantalla, queda el aviso
+            }
+            return
+        }
+        updMsg = "Descargando…"
+        showUpdate()
+        thread {
+            try {
+                val f = File(cacheDir, "update.apk")
+                val c = URL(updBase + "EVA-TV.apk").openConnection() as HttpURLConnection
+                c.connectTimeout = 15000
+                c.readTimeout = 30000
+                c.instanceFollowRedirects = true
+                val total = c.contentLength.toLong()
+                c.inputStream.use { input ->
+                    f.outputStream().use { out ->
+                        val buf = ByteArray(64 * 1024)
+                        var done = 0L
+                        var last = 0
+                        while (true) {
+                            val n = input.read(buf)
+                            if (n < 0) break
+                            out.write(buf, 0, n)
+                            done += n
+                            if (total > 0) {
+                                val pct = (done * 100 / total).toInt()
+                                if (pct >= last + 10) {
+                                    last = pct
+                                    runOnUiThread { showOsd("Descargando $pct%", 2000) }
+                                }
+                            }
+                        }
+                    }
+                }
+                c.disconnect()
+                runOnUiThread { installApk(f) }
+            } catch (e: Exception) {
+                runOnUiThread {
+                    updMsg = "Falló la descarga. Intenta de nuevo"
+                    if (menuIndex == updIdx) showUpdate()
+                }
+            }
+        }
+    }
+
+    private fun installApk(f: File) {
+        try {
+            val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", f)
+            val i = Intent(Intent.ACTION_VIEW)
+                .setDataAndType(uri, "application/vnd.android.package-archive")
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+            startActivity(i)
+        } catch (e: Exception) {
+            updMsg = "No se pudo abrir el instalador"
+            if (menuIndex == updIdx) showUpdate()
         }
     }
 
@@ -664,7 +798,7 @@ class MainActivity : Activity() {
         }
         if (e.keyCode == KeyEvent.KEYCODE_MENU && list.hasFocus()) {
             val pos = list.selectedItemPosition
-            shown.getOrNull(pos)?.let { if (it.url.isNotEmpty()) toggleFav(it) }
+            shown.getOrNull(pos)?.let { if (it.url.isNotEmpty() && !it.url.startsWith("app://")) toggleFav(it) }
             return true
         }
         return super.dispatchKeyEvent(e)

@@ -3,6 +3,9 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+// El numero de version lo pone GitHub al compilar (-PverCode=N); asi la app sabe si hay una nueva
+val verCode = (project.findProperty("verCode") as String?)?.toIntOrNull() ?: 1
+
 android {
     namespace = "com.evatv"
     compileSdk = 34
@@ -11,13 +14,27 @@ android {
         applicationId = "com.evatv"
         minSdk = 21
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = verCode
+        versionName = "1.$verCode"
+    }
+
+    // Llave fija: asi cada version nueva se instala ENCIMA de la anterior
+    signingConfigs {
+        create("evatv") {
+            storeFile = file("eva-tv.jks")
+            storePassword = "evatv2026"
+            keyAlias = "evatv"
+            keyPassword = "evatv2026"
+        }
     }
 
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("evatv")
+        }
         release {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("evatv")
         }
     }
 
@@ -39,4 +56,5 @@ dependencies {
     implementation("androidx.media3:media3-exoplayer-hls:$media3")
     implementation("androidx.media3:media3-ui:$media3")
     implementation("androidx.annotation:annotation:1.8.0")
+    implementation("androidx.core:core:1.13.1")
 }
