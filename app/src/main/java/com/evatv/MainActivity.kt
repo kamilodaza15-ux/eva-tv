@@ -32,6 +32,8 @@ data class Channel(
     val referrer: String?
 )
 
+data class Section(val name: String, val channels: List<Channel>)
+
 @OptIn(UnstableApi::class)
 class MainActivity : Activity() {
 
@@ -40,12 +42,18 @@ class MainActivity : Activity() {
     private lateinit var spinner: View
     private lateinit var panel: View
     private lateinit var list: ListView
+    private lateinit var sectionTitle: TextView
 
     private var player: ExoPlayer? = null
-    private var channels: List<Channel> = emptyList()
+    private var sections: List<Section> = emptyList()
+    private var sec = 0      // seccion que se esta reproduciendo
+    private var browse = 0   // seccion que se ve en el menu
     private var current = -1
     private val handler = Handler(Looper.getMainLooper())
     private val hideOsd = Runnable { osd.visibility = View.GONE }
+
+    private val channels: List<Channel>
+        get() = sections.getOrNull(sec)?.channels ?: emptyList()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -56,7 +64,9 @@ class MainActivity : Activity() {
         spinner = findViewById(R.id.spinner)
         panel = findViewById(R.id.panel)
         list = findViewById(R.id.list)
+        sectionTitle = findViewById(R.id.sectionTitle)
         list.setOnItemClickListener { _, _, pos, _ ->
+            sec = browse
             play(pos)
             hidePanel()
         }
@@ -102,25 +112,42 @@ class MainActivity : Activity() {
 
     private fun loadChannels() {
         thread {
-            val cache = File(filesDir, "playlist.m3u")
-            var text: String? = null
-            try {
-                text = download(getString(R.string.playlist_url))
-                cache.writeText(text)
-            } catch (e: Exception) {
-                if (cache.exists()) text = cache.readText()
-            }
             val extra = resources.openRawResource(R.raw.mis_canales)
                 .bufferedReader().use { it.readText() }
-            val all = parseM3u(extra) + (if (text != null) parseM3u(text) else emptyList())
-            runOnUiThread { if (!isFinishing) onChannels(all) }
+            val defs = listOf(
+                Triple(getString(R.string.sec_colombia), getString(R.string.playlist_url), false),
+                Triple(getString(R.string.sec_movies), getString(R.string.playlist_movies_url), false),
+                Triple(getString(R.string.sec_movies_es), getString(R.string.playlist_movies_es_url), true)
+            )
+            val out = ArrayList<Section>()
+            val moviesUrls = HashSet<String>()
+            for ((i, d) in defs.withIndex()) {
+                val cache = File(filesDir, "playlist_$i.m3u")
+                var text: String? = null
+                try {
+                    text = download(d.second)
+                    cache.writeText(text)
+                } catch (e: Exception) {
+                    if (cache.exists()) text = cache.readText()
+                }
+                var items: List<Channel> = if (text != null) parseM3u(text) else emptyList()
+                if (d.third) {
+                    items = items.filter {
+                        it.group.contains("movie", true) || it.group.contains("pel", true)
+                    }.filter { it.url !in moviesUrls }
+                }
+                if (i == 1) items.forEach { moviesUrls.add(it.url) }
+                if (i == 0) items = parseM3u(extra) + items
+                if (items.isNotEmpty()) out.add(Section(d.first, items))
+            }
+            runOnUiThread { if (!isFinishing) onSections(out) }
         }
     }
 
     private fun download(u: String): String {
         val c = URL(u).openConnection() as HttpURLConnection
         c.connectTimeout = 10000
-        c.readTimeout = 15000
+        c.readTimeout = 20000
         c.instanceFollowRedirects = true
         try {
             if (c.responseCode != 200) throw Exception("HTTP ${c.responseCode}")
@@ -162,27 +189,43 @@ class MainActivity : Activity() {
         return out
     }
 
-    private fun onChannels(all: List<Channel>) {
-        channels = all
+    private fun onSections(all: List<Section>) {
+        sections = all
         if (all.isEmpty()) {
             showOsd(getString(R.string.no_channels), 8000)
             return
         }
-        list.adapter = ArrayAdapter(
-            this, R.layout.item_channel, all.map { it.name }
-        )
         val last = getSharedPreferences("eva", MODE_PRIVATE).getString("last", null)
-        val idx = all.indexOfFirst { it.url == last }
-        play(if (idx >= 0) idx else 0)
+        var s = 0
+        var idx = 0
+        for ((si, sc) in all.withIndex()) {
+            val k = sc.channels.indexOfFirst { it.url == last }
+            if (k >= 0) {
+                s = si
+                idx = k
+                break
+            }
+        }
+        sec = s
+        browse = s
+        refreshList()
+        play(idx)
+    }
+
+    private fun refreshList() {
+        val sc = sections.getOrNull(browse) ?: return
+        list.adapter = ArrayAdapter(this, R.layout.item_channel, sc.channels.map { it.name })
+        sectionTitle.text = if (sections.size > 1) "‹  ${sc.name}  ›" else sc.name
     }
 
     // ---------- Reproduccion ----------
 
     private fun play(i: Int) {
-        if (channels.isEmpty()) return
-        val idx = ((i % channels.size) + channels.size) % channels.size
+        val list = channels
+        if (list.isEmpty()) return
+        val idx = ((i % list.size) + list.size) % list.size
         current = idx
-        val ch = channels[idx]
+        val ch = list[idx]
         getSharedPreferences("eva", MODE_PRIVATE).edit().putString("last", ch.url).apply()
         showOsd("${idx + 1}  ${ch.name}", 3000)
 
@@ -206,6 +249,8 @@ class MainActivity : Activity() {
     // ---------- Control remoto ----------
 
     private fun showPanel() {
+        browse = sec
+        refreshList()
         panel.visibility = View.VISIBLE
         list.requestFocus()
         list.post { if (current >= 0) list.setSelection(current) }
@@ -215,6 +260,14 @@ class MainActivity : Activity() {
         panel.visibility = View.GONE
     }
 
+    private fun switchSection(d: Int) {
+        if (sections.size < 2) return
+        browse = (browse + d + sections.size) % sections.size
+        refreshList()
+        val sel = if (browse == sec && current >= 0) current else 0
+        list.post { list.setSelection(sel) }
+    }
+
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
         if (panel.visibility == View.VISIBLE) hidePanel() else super.onBackPressed()
@@ -222,7 +275,19 @@ class MainActivity : Activity() {
 
     override fun dispatchKeyEvent(e: KeyEvent): Boolean {
         if (e.action != KeyEvent.ACTION_DOWN) return super.dispatchKeyEvent(e)
-        if (panel.visibility == View.VISIBLE) return super.dispatchKeyEvent(e)
+        if (panel.visibility == View.VISIBLE) {
+            when (e.keyCode) {
+                KeyEvent.KEYCODE_DPAD_LEFT -> {
+                    switchSection(-1)
+                    return true
+                }
+                KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                    switchSection(1)
+                    return true
+                }
+            }
+            return super.dispatchKeyEvent(e)
+        }
         when (e.keyCode) {
             KeyEvent.KEYCODE_DPAD_CENTER,
             KeyEvent.KEYCODE_ENTER,
