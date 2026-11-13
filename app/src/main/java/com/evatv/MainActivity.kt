@@ -42,7 +42,10 @@ import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 import java.text.Normalizer
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.concurrent.thread
 
 data class Channel(
@@ -152,7 +155,11 @@ class MainActivity : Activity() {
     private lateinit var search: EditText
 
     private var player: ExoPlayer? = null
-    private val data = HashMap<Int, List<Channel>>()
+    private val data = HashMap<Int, List<Channel>>()       // listas sin los canales caidos
+    private val rawData = HashMap<Int, List<Channel>>()    // listas completas
+    private val health = HashMap<String, Long>()           // url -> cuando se detecto caido
+    private var cleaning = false
+    private var cleanMsg = ""
     private var fav: MutableList<Channel> = ArrayList()
     private var shown: List<Channel> = emptyList()
     private var menuIndex = 0
@@ -186,7 +193,7 @@ class MainActivity : Activity() {
         list = findViewById(R.id.list)
         search = findViewById(R.id.search)
 
-        labels = listOf("Buscar") + sources.map { it.name } + listOf("Favoritos", "Actualizar")
+        labels = listOf("Buscar") + sources.map { it.name } + listOf("Favoritos", "Ajustes")
         menu.adapter = ArrayAdapter(this, R.layout.item_menu, labels)
         menu.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(p: AdapterView<*>?, v: View?, pos: Int, id: Long) {
@@ -244,6 +251,8 @@ class MainActivity : Activity() {
         }
 
         fav = loadFav()
+        loadHealth()
+        File(cacheDir, "update.apk").delete()   // ya se instalo: no dejar el archivo ocupando espacio
         showSection(1)
         loadAll()
         list.requestFocus()
@@ -260,7 +269,18 @@ class MainActivity : Activity() {
 
             override fun onPlayerError(error: PlaybackException) {
                 spinner.visibility = View.GONE
-                showOsd("Canal no disponible: ${playing?.name ?: ""}", 5000)
+                val ch = playing
+                showOsd("Canal no disponible: ${ch?.name ?: ""}", 5000)
+                if (ch != null) {
+                    thread {
+                        if (online() && !checkAlive(ch)) {
+                            runOnUiThread {
+                                markDead(ch.url)
+                                showOsd("Canal caído: lo oculté de la lista", 4000)
+                            }
+                        }
+                    }
+                }
             }
         })
         playerView.player = p
@@ -341,7 +361,9 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun onLoaded(i: Int, res: List<Channel>) {
+    private fun onLoaded(i: Int, raw: List<Channel>) {
+        rawData[i] = raw
+        val res = filterDead(raw)
         data[i] = res
         if (menuIndex == i + 1) {
             showSection(i + 1)
@@ -582,13 +604,187 @@ class MainActivity : Activity() {
         if (updNew > installedCode()) {
             rows.add(Channel("Descargar e instalar la versión $updNew", "", "app://install", null, null, null))
         }
+        rows.add(Channel("Canales", "", "", null, null, null))
+        if (cleanMsg.isNotEmpty()) rows.add(Channel(cleanMsg, "", "", null, null, null))
+        rows.add(Channel("Limpiar canales que no cargan", "", "app://clean", null, null, null))
+        val hidden = health.keys.count { isDead(it) }
+        if (hidden > 0) {
+            rows.add(Channel("Mostrar de nuevo los $hidden ocultos", "", "app://reset", null, null, null))
+        }
         shown = rows
-        listTitle.text = "Actualizar EVA TV"
+        listTitle.text = "Ajustes"
         list.adapter = ChannelAdapter(shown)
     }
 
+    // ---------- Canales que no cargan ----------
+
+    private fun isDead(url: String): Boolean {
+        val t = health[url] ?: return false
+        return System.currentTimeMillis() - t < 7L * 24 * 3600 * 1000   // se vuelve a intentar a los 7 dias
+    }
+
+    private fun filterDead(l: List<Channel>): List<Channel> {
+        val out = ArrayList<Channel>()
+        var pending: Channel? = null
+        for (ch in l) {
+            if (ch.url.isEmpty()) {
+                pending = ch
+                continue
+            }
+            if (isDead(ch.url)) continue
+            pending?.let {
+                out.add(it)
+                pending = null
+            }
+            out.add(ch)
+        }
+        return out
+    }
+
+    private fun loadHealth() {
+        val f = File(filesDir, "dead.txt")
+        if (!f.exists()) return
+        try {
+            for (line in f.readLines()) {
+                val p = line.split("\t")
+                if (p.size == 2) health[p[0]] = p[1].toLongOrNull() ?: 0L
+            }
+        } catch (e: Exception) {
+            // archivo danado: se ignora
+        }
+    }
+
+    private fun saveHealth() {
+        try {
+            File(filesDir, "dead.txt").writeText(health.entries.joinToString("\n") { "${it.key}\t${it.value}" })
+        } catch (e: Exception) {
+            // sin espacio o sin permiso: no pasa nada
+        }
+    }
+
+    private fun rebuildData() {
+        for ((i, r) in rawData) data[i] = filterDead(r)
+        if (fullscreen) return
+        val pos = list.selectedItemPosition
+        showSection(menuIndex)
+        if (pos > 0 && menuIndex != updIdx) list.setSelection(minOf(pos, maxOf(shown.size - 1, 0)))
+    }
+
+    private fun markDead(url: String) {
+        health[url] = System.currentTimeMillis()
+        saveHealth()
+        rebuildData()
+    }
+
+    private fun online(): Boolean = try {
+        download(updBase + "version.txt")
+        true
+    } catch (e: Exception) {
+        false
+    }
+
+    /** Pide el inicio del stream y mira que sea de verdad una lista/video (no un error ni una pagina). */
+    private fun checkAlive(ch: Channel): Boolean {
+        return try {
+            val c = URL(ch.url).openConnection() as HttpURLConnection
+            c.connectTimeout = 4000
+            c.readTimeout = 4000
+            c.instanceFollowRedirects = true
+            ch.userAgent?.let { c.setRequestProperty("User-Agent", it) }
+            ch.referrer?.let { c.setRequestProperty("Referer", it) }
+            try {
+                if (c.responseCode !in 200..299) return false
+                val ct = (c.contentType ?: "").lowercase()
+                if (ct.contains("html")) return false
+                val buf = ByteArray(1024)
+                val n = c.inputStream.read(buf)
+                if (n <= 0) return false
+                val head = String(buf, 0, n, Charsets.ISO_8859_1).trimStart()
+                head.startsWith("#EXTM3U") || ct.contains("video") || ct.contains("mpegurl") ||
+                    ct.contains("octet") || ct.contains("mp2t") || ct.contains("mpeg")
+            } finally {
+                c.disconnect()
+            }
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    private fun finishClean(msg: String) {
+        runOnUiThread {
+            cleaning = false
+            cleanMsg = msg
+            if (menuIndex == updIdx) showUpdate()
+        }
+    }
+
+    private fun startClean() {
+        if (cleaning) return
+        cleaning = true
+        cleanMsg = "Preparando…"
+        showUpdate()
+        thread {
+            if (!online()) {
+                finishClean("Sin internet. Intenta de nuevo")
+                return@thread
+            }
+            val all = LinkedHashMap<String, Channel>()
+            for ((_, l) in rawData) for (ch in l) if (ch.url.isNotEmpty()) all.putIfAbsent(ch.url, ch)
+            val todo = all.values.toList()
+            val total = todo.size
+            if (total == 0) {
+                finishClean("Todavía no hay canales cargados")
+                return@thread
+            }
+            val deadNow = ConcurrentHashMap<String, Long>()
+            val counter = AtomicInteger(0)
+            val latch = CountDownLatch(total)
+            val pool = Executors.newFixedThreadPool(12)
+            for (ch in todo) {
+                pool.execute {
+                    try {
+                        if (!checkAlive(ch)) deadNow[ch.url] = System.currentTimeMillis()
+                    } finally {
+                        val n = counter.incrementAndGet()
+                        latch.countDown()
+                        if (n % 25 == 0) {
+                            runOnUiThread {
+                                cleanMsg = "Revisando $n de $total…"
+                                if (menuIndex == updIdx) showUpdate()
+                            }
+                        }
+                    }
+                }
+            }
+            latch.await()
+            pool.shutdown()
+            if (total > 50 && deadNow.size > total * 0.9) {
+                finishClean("Casi todo falló: parece que se fue el internet. No cambié nada")
+                return@thread
+            }
+            runOnUiThread {
+                for (ch in todo) health.remove(ch.url)   // los que ahora si cargan vuelven a salir
+                for ((u, t) in deadNow) health[u] = t
+                saveHealth()
+                cleaning = false
+                cleanMsg = "Listo: oculté ${deadNow.size} de $total canales que no cargan"
+                rebuildData()
+            }
+        }
+    }
+
     private fun handleAction(a: String) {
-        if (a == "app://check") checkUpdate() else if (a == "app://install") downloadAndInstall()
+        when (a) {
+            "app://check" -> checkUpdate()
+            "app://install" -> downloadAndInstall()
+            "app://clean" -> startClean()
+            "app://reset" -> {
+                health.clear()
+                saveHealth()
+                cleanMsg = "Listo: todos los canales vuelven a salir"
+                rebuildData()
+            }
+        }
     }
 
     private fun checkUpdate() {
