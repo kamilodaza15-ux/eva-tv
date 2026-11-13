@@ -160,6 +160,14 @@ class MainActivity : Activity() {
     private val health = HashMap<String, Long>()           // url -> cuando se detecto caido
     private var cleaning = false
     @Volatile private var loadedCount = 0
+    private val okAt = HashMap<String, Long>()      // url -> ultima vez que se comprobo que funciona
+    @Volatile private var bgRunning = false
+    private val bgTick = object : Runnable {
+        override fun run() {
+            startBackgroundCheck()
+            handler.postDelayed(this, 15L * 60 * 1000)
+        }
+    }
     private var cleanMsg = ""
     private var fav: MutableList<Channel> = ArrayList()
     private var shown: List<Channel> = emptyList()
@@ -253,6 +261,7 @@ class MainActivity : Activity() {
 
         fav = loadFav()
         loadHealth()
+        handler.postDelayed(bgTick, 90_000)   // revision silenciosa mientras la app esta abierta
         File(cacheDir, "update.apk").delete()   // ya se instalo: no dejar el archivo ocupando espacio
         showSection(1)
         loadAll()
@@ -644,6 +653,16 @@ class MainActivity : Activity() {
     }
 
     private fun loadHealth() {
+        val ok = File(filesDir, "ok.txt")
+        if (ok.exists()) {
+            try {
+                for (line in ok.readLines()) {
+                    val p = line.split("\t")
+                    if (p.size == 2) okAt[p[0]] = p[1].toLongOrNull() ?: 0L
+                }
+            } catch (e: Exception) {
+            }
+        }
         val f = File(filesDir, "dead.txt")
         if (!f.exists()) return
         try {
@@ -657,6 +676,10 @@ class MainActivity : Activity() {
     }
 
     private fun saveHealth() {
+        try {
+            File(filesDir, "ok.txt").writeText(okAt.entries.joinToString("\n") { "${it.key}\t${it.value}" })
+        } catch (e: Exception) {
+        }
         try {
             File(filesDir, "dead.txt").writeText(health.entries.joinToString("\n") { "${it.key}\t${it.value}" })
         } catch (e: Exception) {
@@ -709,6 +732,57 @@ class MainActivity : Activity() {
             }
         } catch (e: Exception) {
             false
+        }
+    }
+
+    /** Cada 15 min, con el TV prendido: prueba de a pocos los canales sin revisar o con revision vieja. */
+    private fun startBackgroundCheck() {
+        if (cleaning || bgRunning || loadedCount < sources.size) return
+        val now = System.currentTimeMillis()
+        val week = 7L * 24 * 3600 * 1000
+        val cur = playing?.url
+        val todo = ArrayList<Channel>()
+        val seen = HashSet<String>()
+        for ((_, l) in rawData) for (ch in l) {
+            if (ch.url.isEmpty() || ch.url == cur || !seen.add(ch.url)) continue
+            val fresh = (okAt[ch.url] ?: 0L) > now - week
+            val hidden = isDead(ch.url)
+            if (!fresh && !hidden) todo.add(ch)
+            if (todo.size >= 100) break
+        }
+        if (todo.isEmpty()) return
+        bgRunning = true
+        thread(priority = Thread.MIN_PRIORITY) {
+            try {
+                if (!online()) return@thread
+                val dead = ConcurrentHashMap<String, Long>()
+                val alive = ConcurrentHashMap<String, Long>()
+                val pool = Executors.newFixedThreadPool(2)
+                val latch = CountDownLatch(todo.size)
+                for (ch in todo) {
+                    pool.execute {
+                        try {
+                            if (checkAlive(ch)) alive[ch.url] = System.currentTimeMillis()
+                            else dead[ch.url] = System.currentTimeMillis()
+                            Thread.sleep(200)
+                        } catch (e: Exception) {
+                        } finally {
+                            latch.countDown()
+                        }
+                    }
+                }
+                latch.await()
+                pool.shutdown()
+                if (todo.size > 20 && dead.size > todo.size * 0.9) return@thread   // probable falla de internet
+                runOnUiThread {
+                    for ((u, t) in alive) { okAt[u] = t; health.remove(u) }
+                    for ((u, t) in dead) health[u] = t
+                    saveHealth()
+                    if (dead.isNotEmpty() && !cleaning) rebuildData()
+                }
+            } finally {
+                bgRunning = false
+            }
         }
     }
 
@@ -774,7 +848,11 @@ class MainActivity : Activity() {
                 return@thread
             }
             runOnUiThread {
-                for (ch in todo) health.remove(ch.url)   // los que ahora si cargan vuelven a salir
+                val t0 = System.currentTimeMillis()
+                for (ch in todo) {
+                    health.remove(ch.url)   // los que ahora si cargan vuelven a salir
+                    if (!deadNow.containsKey(ch.url)) okAt[ch.url] = t0
+                }
                 for ((u, t) in deadNow) health[u] = t
                 saveHealth()
                 cleaning = false
