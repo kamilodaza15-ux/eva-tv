@@ -14,11 +14,10 @@ App de TV para tu Android TV con la lista gratuita de canales de Colombia (iptv-
 - Si el TV pide permiso para "fuentes desconocidas", activalo para esa app.
 
 ## Control remoto
-- OK / Flecha izquierda / Menu: abre la lista de canales
-- Flecha arriba / abajo: siguiente / anterior canal
-- En el menu: flecha izquierda / derecha cambia de seccion (Colombia, Peliculas)
-- Buscar: en el menu sube hasta el cuadro "Buscar…" (o el boton de busqueda del control), escribe y busca en todas las secciones
-- Atras: cierra la lista (o sale de la app)
+- Al abrir: menu principal con dos botones, Canales y Peliculas
+- En una lista: OK reproduce el canal; sube hasta "Buscar..." para buscar en todo
+- Mientras ves un canal: flecha arriba / abajo cambia de canal; OK o izquierda abre la lista; Menu abre el menu principal
+- Atras: sube un nivel (lista -> menu -> salir)
 
 ## Personalizar
 - Nombre: `app/src/main/res/values/strings.xml` (app_name)
