@@ -39,19 +39,19 @@
         android:id="@+id/panel"
         android:layout_width="380dp"
         android:layout_height="match_parent"
-        android:background="#E60B2418"
+        android:background="#EB1E0A28"
         android:orientation="vertical"
         android:visibility="gone">
 
-        <TextView
+        <ImageView
             android:id="@+id/title"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:padding="24dp"
-            android:text="@string/app_name"
-            android:textColor="#FFA8DE78"
-            android:textSize="32sp"
-            android:textStyle="bold" />
+            android:adjustViewBounds="true"
+            android:background="#FFFFFFFF"
+            android:contentDescription="@string/app_name"
+            android:padding="12dp"
+            android:src="@drawable/logo_header" />
 
         <ListView
             android:id="@+id/list"
