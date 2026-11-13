@@ -45,7 +45,8 @@ data class Channel(
     val url: String,
     val logo: String?,
     val userAgent: String?,
-    val referrer: String?
+    val referrer: String?,
+    val tvgId: String? = null
 )
 
 /** Una seccion del menu: nombre y sus listas (url, filtrar solo peliculas). */
@@ -247,8 +248,21 @@ class MainActivity : Activity() {
 
     // ---------- Carga de listas ----------
 
+    // Paises de habla hispana (codigo al final del tvg-id, ej. "Caracol.co@SD")
+    private val spanishCountries = setOf(
+        "co", "mx", "ar", "es", "cl", "pe", "ve", "ec", "uy", "bo", "py",
+        "cr", "pa", "do", "gt", "sv", "hn", "ni", "cu", "pr"
+    )
+
+    private fun isSpanishId(id: String?): Boolean {
+        if (id == null) return false
+        val code = id.substringBefore("@").substringAfterLast(".", "").lowercase()
+        return code in spanishCountries
+    }
+
     private fun loadAll() {
         thread {
+            val spaUrls = HashSet<String>()
             val extra = resources.openRawResource(R.raw.mis_canales)
                 .bufferedReader().use { it.readText() }
             for ((i, src) in sources.withIndex()) {
@@ -271,7 +285,13 @@ class MainActivity : Activity() {
                     }
                     all.addAll(items)
                 }
-                val res = all.distinctBy { it.url }
+                var res = all.distinctBy { it.url }
+                if (i == 1) res.forEach { spaUrls.add(it.url) }
+                if (i >= 2) {
+                    // solo canales en espanol: de la lista de idioma espanol o de paises hispanos
+                    val es = res.filter { it.url in spaUrls || isSpanishId(it.tvgId) }
+                    if (es.isNotEmpty()) res = es
+                }
                 runOnUiThread { if (!isFinishing) onLoaded(i, res) }
             }
         }
@@ -313,9 +333,11 @@ class MainActivity : Activity() {
         val out = ArrayList<Channel>()
         val groupRe = Regex("group-title=\"([^\"]*)\"")
         val logoRe = Regex("tvg-logo=\"([^\"]*)\"")
+        val idRe = Regex("tvg-id=\"([^\"]*)\"")
         var name: String? = null
         var group = ""
         var logo: String? = null
+        var tid: String? = null
         var ua: String? = null
         var ref: String? = null
         for (raw in text.lineSequence()) {
@@ -325,6 +347,7 @@ class MainActivity : Activity() {
                 name = line.substringAfterLast(",").trim()
                 group = groupRe.find(line)?.groupValues?.get(1) ?: ""
                 logo = logoRe.find(line)?.groupValues?.get(1)?.ifEmpty { null }
+                tid = idRe.find(line)?.groupValues?.get(1)?.ifEmpty { null }
                 ua = null
                 ref = null
             } else if (line.startsWith("#EXTVLCOPT:http-user-agent=")) {
@@ -335,9 +358,10 @@ class MainActivity : Activity() {
                 continue
             } else {
                 val n = name
-                if (n != null) out.add(Channel(n, group, line, logo, ua, ref))
+                if (n != null) out.add(Channel(n, group, line, logo, ua, ref, tid))
                 name = null
                 logo = null
+                tid = null
                 ua = null
                 ref = null
             }
@@ -573,6 +597,10 @@ class MainActivity : Activity() {
         }
         if (list.hasFocus() && e.keyCode == KeyEvent.KEYCODE_DPAD_LEFT) {
             focusMenu()
+            return true
+        }
+        if (list.hasFocus() && e.keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) {
+            if (playing != null) enterFullscreen()
             return true
         }
         if (e.keyCode == KeyEvent.KEYCODE_MENU && list.hasFocus()) {

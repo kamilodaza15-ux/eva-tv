@@ -92,7 +92,7 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="2dp"
-                android:text="OK en un canal: verlo aquí   ·   OK otra vez: pantalla completa   ·   Menú del control: favorito"
+                android:text="OK en un canal: verlo aquí   ·   Derecha u OK otra vez: pantalla completa   ·   Menú del control: favorito"
                 android:textColor="#99FFFFFF"
                 android:textSize="12sp" />
         </LinearLayout>
