@@ -4,9 +4,9 @@
     android:layout_height="wrap_content"
     android:background="@drawable/menu_item_bg"
     android:checkMark="@null"
-    android:paddingStart="22dp"
-    android:paddingTop="14dp"
+    android:paddingStart="16dp"
+    android:paddingTop="9dp"
     android:paddingEnd="12dp"
-    android:paddingBottom="14dp"
+    android:paddingBottom="9dp"
     android:textColor="#FFFFFFFF"
-    android:textSize="20sp" />
+    android:textSize="17sp" />

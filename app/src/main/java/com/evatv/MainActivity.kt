@@ -104,7 +104,8 @@ class MainActivity : Activity() {
     // Secciones del menu izquierdo (despues van Favoritos y Buscar)
     private val sources: List<Src> by lazy {
         listOf(
-            Src("Canales", listOf(Pair(getString(R.string.playlist_url), false))),
+            Src("Colombia", listOf(Pair(getString(R.string.playlist_url), false))),
+            Src("Canales", listOf(Pair(base + "languages/spa.m3u", false))),
             Src(
                 "Películas",
                 listOf(Pair(base + "languages/spa.m3u", true), Pair(base + "categories/movies.m3u", false))
@@ -117,8 +118,9 @@ class MainActivity : Activity() {
             Src("Música", listOf(Pair(base + "categories/music.m3u", false)))
         )
     }
-    private val favIdx get() = sources.size
-    private val searchIdx get() = sources.size + 1
+    // Menu: 0 = Buscar, 1..n = secciones, n+1 = Favoritos
+    private val searchIdx get() = 0
+    private val favIdx get() = sources.size + 1
 
     private lateinit var labels: List<String>
     private lateinit var playerView: PlayerView
@@ -165,11 +167,11 @@ class MainActivity : Activity() {
         list = findViewById(R.id.list)
         search = findViewById(R.id.search)
 
-        labels = sources.map { it.name } + listOf("Favoritos", "Buscar")
+        labels = listOf("Buscar") + sources.map { it.name } + listOf("Favoritos")
         menu.adapter = ArrayAdapter(this, R.layout.item_menu, labels)
         menu.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(p: AdapterView<*>?, v: View?, pos: Int, id: Long) {
-                showSection(pos)
+                if (menu.hasFocus()) showSection(pos)
             }
 
             override fun onNothingSelected(p: AdapterView<*>?) {}
@@ -204,7 +206,7 @@ class MainActivity : Activity() {
         }
 
         fav = loadFav()
-        showSection(0)
+        showSection(1)
         loadAll()
         list.requestFocus()
     }
@@ -277,8 +279,8 @@ class MainActivity : Activity() {
 
     private fun onLoaded(i: Int, res: List<Channel>) {
         data[i] = res
-        if (menuIndex == i) {
-            showSection(i)
+        if (menuIndex == i + 1) {
+            showSection(i + 1)
         } else if (menuIndex == searchIdx) {
             applyQuery(search.text.toString())
         }
@@ -289,7 +291,7 @@ class MainActivity : Activity() {
                 val last = getSharedPreferences("eva", MODE_PRIVATE).getString("last", null)
                 val k = res.indexOfFirst { it.url == last }
                 play(res, if (k >= 0) k else 0)
-                if (menuIndex == 0) list.setSelection(if (k >= 0) k else 0)
+                if (menuIndex == 1) list.setSelection(if (k >= 0) k else 0)
             }
         }
     }
@@ -399,10 +401,9 @@ class MainActivity : Activity() {
         search.visibility = if (searching) View.VISIBLE else View.GONE
         if (!searching && search.text.isNotEmpty()) search.setText("")
         when {
-            idx < sources.size -> {
-                shown = data[idx] ?: emptyList()
-                listTitle.text =
-                    if (data.containsKey(idx)) labels[idx] else labels[idx] + "  (cargando…)"
+            searching -> {
+                applyQuery(search.text.toString())
+                return
             }
             idx == favIdx -> {
                 shown = fav.toList()
@@ -410,11 +411,18 @@ class MainActivity : Activity() {
                     if (fav.isEmpty()) "Favoritos (vacío)\nUsa Menú u OK largo en un canal" else "Favoritos"
             }
             else -> {
-                applyQuery(search.text.toString())
-                return
+                val src = idx - 1
+                shown = data[src] ?: emptyList()
+                listTitle.text =
+                    if (data.containsKey(src)) labels[idx] else labels[idx] + "  (cargando…)"
             }
         }
         list.adapter = ChannelAdapter(shown)
+    }
+
+    private fun focusMenu() {
+        menu.requestFocus()
+        menu.setSelection(menuIndex)
     }
 
     private fun norm(s: String): String =
@@ -502,14 +510,13 @@ class MainActivity : Activity() {
         nowTitle.visibility = View.GONE
         nowHint.visibility = View.GONE
         centerPane.setPadding(0, 0, 0, 0)
-        previewBox.requestFocus()
         hideKeyboard()
         showOsd(playing?.name ?: "", 3000)
     }
 
     private fun exitFullscreen() {
         fullscreen = false
-        val pad = (16 * resources.displayMetrics.density).toInt()
+        val pad = (12 * resources.displayMetrics.density).toInt()
         centerPane.setPadding(pad, pad, pad, pad)
         menuPane.visibility = View.VISIBLE
         listPane.visibility = View.VISIBLE
@@ -526,7 +533,7 @@ class MainActivity : Activity() {
     override fun onBackPressed() {
         when {
             fullscreen -> exitFullscreen()
-            !menu.hasFocus() -> menu.requestFocus()
+            !menu.hasFocus() -> focusMenu()
             else -> super.onBackPressed()
         }
     }
@@ -558,6 +565,14 @@ class MainActivity : Activity() {
         if (e.keyCode == KeyEvent.KEYCODE_SEARCH) {
             showSection(searchIdx)
             search.requestFocus()
+            return true
+        }
+        if (menu.hasFocus() && e.keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) {
+            if (menuIndex == searchIdx) search.requestFocus() else list.requestFocus()
+            return true
+        }
+        if (list.hasFocus() && e.keyCode == KeyEvent.KEYCODE_DPAD_LEFT) {
+            focusMenu()
             return true
         }
         if (e.keyCode == KeyEvent.KEYCODE_MENU && list.hasFocus()) {
