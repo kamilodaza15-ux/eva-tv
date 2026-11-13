@@ -709,28 +709,63 @@ class MainActivity : Activity() {
         false
     }
 
-    /** Pide el inicio del stream y mira que sea de verdad una lista/video (no un error ni una pagina). */
+    /** Descarga hasta max bytes de una url (con la identidad del canal). null si no responde 2xx. */
+    private fun fetchHead(url: String, ch: Channel, max: Int): Pair<String, ByteArray>? {
+        val c = URL(url).openConnection() as HttpURLConnection
+        c.connectTimeout = 4000
+        c.readTimeout = 4000
+        c.instanceFollowRedirects = true
+        ch.userAgent?.let { c.setRequestProperty("User-Agent", it) }
+        ch.referrer?.let { c.setRequestProperty("Referer", it) }
+        try {
+            if (c.responseCode !in 200..299) return null
+            val ct = (c.contentType ?: "").lowercase()
+            val out = java.io.ByteArrayOutputStream()
+            val buf = ByteArray(4096)
+            c.inputStream.use { input ->
+                while (out.size() < max) {
+                    val n = input.read(buf, 0, minOf(buf.size, max - out.size()))
+                    if (n < 0) break
+                    out.write(buf, 0, n)
+                }
+            }
+            return Pair(ct, out.toByteArray())
+        } finally {
+            c.disconnect()
+        }
+    }
+
+    private fun resolveUrl(base: String, ref: String): String = URL(URL(base), ref).toString()
+
+    /**
+     * Prueba profunda: lista principal -> lista de la calidad -> primer/ultimo trozo de video.
+     * El canal solo cuenta como vivo si el trozo de video llega de verdad.
+     */
     private fun checkAlive(ch: Channel): Boolean {
         return try {
-            val c = URL(ch.url).openConnection() as HttpURLConnection
-            c.connectTimeout = 4000
-            c.readTimeout = 4000
-            c.instanceFollowRedirects = true
-            ch.userAgent?.let { c.setRequestProperty("User-Agent", it) }
-            ch.referrer?.let { c.setRequestProperty("Referer", it) }
-            try {
-                if (c.responseCode !in 200..299) return false
-                val ct = (c.contentType ?: "").lowercase()
-                if (ct.contains("html")) return false
-                val buf = ByteArray(1024)
-                val n = c.inputStream.read(buf)
-                if (n <= 0) return false
-                val head = String(buf, 0, n, Charsets.ISO_8859_1).trimStart()
-                head.startsWith("#EXTM3U") || ct.contains("video") || ct.contains("mpegurl") ||
-                    ct.contains("octet") || ct.contains("mp2t") || ct.contains("mpeg")
-            } finally {
-                c.disconnect()
+            val first = fetchHead(ch.url, ch, 65536) ?: return false
+            if (first.first.contains("html")) return false
+            val text = String(first.second, Charsets.ISO_8859_1).trimStart()
+            if (!text.startsWith("#EXTM3U")) {
+                // no es lista: video directo (ts, mp4...) con datos
+                return first.second.isNotEmpty()
             }
+            var listUrl = ch.url
+            var lines = text.lines().map { it.trim() }
+            // si es lista maestra (calidades), seguir a la primera calidad
+            val si = lines.indexOfFirst { it.startsWith("#EXT-X-STREAM-INF") }
+            if (si >= 0) {
+                val ref = lines.drop(si + 1).firstOrNull { it.isNotEmpty() && !it.startsWith("#") } ?: return false
+                listUrl = resolveUrl(listUrl, ref)
+                val media = fetchHead(listUrl, ch, 65536) ?: return false
+                if (media.first.contains("html")) return false
+                lines = String(media.second, Charsets.ISO_8859_1).lines().map { it.trim() }
+                if (lines.none { it.startsWith("#EXTM3U") }) return false
+            }
+            // trozo de video: el ultimo (el mas reciente en vivo), o el mapa de inicio
+            val seg = lines.lastOrNull { it.isNotEmpty() && !it.startsWith("#") } ?: return false
+            val seg1 = fetchHead(resolveUrl(listUrl, seg), ch, 2048) ?: return false
+            seg1.second.isNotEmpty() && !seg1.first.contains("html") && !seg1.first.contains("mpegurl")
         } catch (e: Exception) {
             false
         }
