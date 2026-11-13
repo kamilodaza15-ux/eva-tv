@@ -2,18 +2,25 @@ package com.evatv
 
 import android.app.Activity
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.text.Editable
 import android.text.TextWatcher
+import android.util.LruCache
 import android.view.KeyEvent
 import android.view.View
+import android.view.ViewGroup
 import android.view.WindowManager
 import android.view.inputmethod.InputMethodManager
+import android.widget.AdapterView
 import android.widget.ArrayAdapter
-import android.widget.Button
+import android.widget.BaseAdapter
 import android.widget.EditText
+import android.widget.ImageView
+import android.widget.LinearLayout
 import android.widget.ListView
 import android.widget.TextView
 import androidx.annotation.OptIn
@@ -29,44 +36,116 @@ import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 import java.text.Normalizer
+import java.util.concurrent.Executors
 import kotlin.concurrent.thread
 
 data class Channel(
     val name: String,
     val group: String,
     val url: String,
+    val logo: String?,
     val userAgent: String?,
     val referrer: String?
 )
 
-data class Section(val name: String, val channels: List<Channel>)
+/** Una seccion del menu: nombre y sus listas (url, filtrar solo peliculas). */
+data class Src(val name: String, val urls: List<Pair<String, Boolean>>)
+
+/** Carga logos de canales en segundo plano con cache en memoria. */
+object Logos {
+    private val cache = LruCache<String, Bitmap>(80)
+    private val pool = Executors.newFixedThreadPool(4)
+    private val main = Handler(Looper.getMainLooper())
+
+    fun load(iv: ImageView, url: String?) {
+        iv.tag = url
+        iv.setImageDrawable(null)
+        if (url.isNullOrBlank()) return
+        val c = cache.get(url)
+        if (c != null) {
+            iv.setImageBitmap(c)
+            return
+        }
+        pool.execute {
+            try {
+                val conn = URL(url).openConnection() as HttpURLConnection
+                conn.connectTimeout = 6000
+                conn.readTimeout = 8000
+                conn.instanceFollowRedirects = true
+                val bytes = try {
+                    conn.inputStream.use { it.readBytes() }
+                } finally {
+                    conn.disconnect()
+                }
+                val o = BitmapFactory.Options()
+                o.inJustDecodeBounds = true
+                BitmapFactory.decodeByteArray(bytes, 0, bytes.size, o)
+                var s = 1
+                while (o.outWidth / (s * 2) >= 160) s *= 2
+                val o2 = BitmapFactory.Options()
+                o2.inSampleSize = s
+                val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, o2)
+                if (bmp != null) {
+                    cache.put(url, bmp)
+                    main.post { if (iv.tag == url) iv.setImageBitmap(bmp) }
+                }
+            } catch (e: Exception) {
+                // sin logo, no pasa nada
+            }
+        }
+    }
+}
 
 @OptIn(UnstableApi::class)
 class MainActivity : Activity() {
 
+    private val base = "https://iptv-org.github.io/iptv/"
+
+    // Secciones del menu izquierdo (despues van Favoritos y Buscar)
+    private val sources: List<Src> by lazy {
+        listOf(
+            Src("Canales", listOf(Pair(getString(R.string.playlist_url), false))),
+            Src(
+                "Películas",
+                listOf(Pair(base + "languages/spa.m3u", true), Pair(base + "categories/movies.m3u", false))
+            ),
+            Src("Series", listOf(Pair(base + "categories/series.m3u", false))),
+            Src("Kids", listOf(Pair(base + "categories/kids.m3u", false))),
+            Src("Animación", listOf(Pair(base + "categories/animation.m3u", false))),
+            Src("Documentales", listOf(Pair(base + "categories/documentary.m3u", false))),
+            Src("Noticias", listOf(Pair(base + "categories/news.m3u", false))),
+            Src("Música", listOf(Pair(base + "categories/music.m3u", false)))
+        )
+    }
+    private val favIdx get() = sources.size
+    private val searchIdx get() = sources.size + 1
+
+    private lateinit var labels: List<String>
     private lateinit var playerView: PlayerView
     private lateinit var osd: TextView
     private lateinit var spinner: View
-    private lateinit var home: View
-    private lateinit var btnChannels: Button
-    private lateinit var btnMovies: Button
-    private lateinit var panel: View
+    private lateinit var menuPane: View
+    private lateinit var listPane: View
+    private lateinit var centerPane: LinearLayout
+    private lateinit var previewBox: View
+    private lateinit var nowTitle: TextView
+    private lateinit var nowHint: TextView
+    private lateinit var listTitle: TextView
+    private lateinit var menu: ListView
     private lateinit var list: ListView
-    private lateinit var sectionTitle: TextView
     private lateinit var search: EditText
 
     private var player: ExoPlayer? = null
-    private var sections: List<Section> = emptyList()   // 0 = Canales, 1 = Peliculas
-    private var sec = 0        // seccion que se esta reproduciendo
-    private var browse = 0     // seccion que se ve en el menu
-    private var current = -1
-    private var cameFromHome = false
-    private var hits: List<Pair<Int, Int>>? = null  // (seccion, indice) de la busqueda
+    private val data = HashMap<Int, List<Channel>>()
+    private var fav: MutableList<Channel> = ArrayList()
+    private var shown: List<Channel> = emptyList()
+    private var menuIndex = 0
+    private var playing: Channel? = null
+    private var playingList: List<Channel> = emptyList()
+    private var playingIdx = 0
+    private var fullscreen = false
     private val handler = Handler(Looper.getMainLooper())
     private val hideOsd = Runnable { osd.visibility = View.GONE }
-
-    private val channels: List<Channel>
-        get() = sections.getOrNull(sec)?.channels ?: emptyList()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -75,17 +154,41 @@ class MainActivity : Activity() {
         playerView = findViewById(R.id.player)
         osd = findViewById(R.id.osd)
         spinner = findViewById(R.id.spinner)
-        home = findViewById(R.id.home)
-        btnChannels = findViewById(R.id.btnChannels)
-        btnMovies = findViewById(R.id.btnMovies)
-        panel = findViewById(R.id.panel)
+        menuPane = findViewById(R.id.menuPane)
+        listPane = findViewById(R.id.listPane)
+        centerPane = findViewById(R.id.centerPane)
+        previewBox = findViewById(R.id.previewBox)
+        nowTitle = findViewById(R.id.nowTitle)
+        nowHint = findViewById(R.id.nowHint)
+        listTitle = findViewById(R.id.listTitle)
+        menu = findViewById(R.id.menu)
         list = findViewById(R.id.list)
-        sectionTitle = findViewById(R.id.sectionTitle)
         search = findViewById(R.id.search)
 
-        btnChannels.setOnClickListener { openSection(0) }
-        btnMovies.setOnClickListener { openSection(1) }
-        btnChannels.requestFocus()
+        labels = sources.map { it.name } + listOf("Favoritos", "Buscar")
+        menu.adapter = ArrayAdapter(this, R.layout.item_menu, labels)
+        menu.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(p: AdapterView<*>?, v: View?, pos: Int, id: Long) {
+                showSection(pos)
+            }
+
+            override fun onNothingSelected(p: AdapterView<*>?) {}
+        }
+        menu.setOnItemClickListener { _, _, pos, _ ->
+            showSection(pos)
+            if (pos == searchIdx) search.requestFocus() else list.requestFocus()
+        }
+
+        list.setOnItemClickListener { _, _, pos, _ ->
+            val ch = shown.getOrNull(pos) ?: return@setOnItemClickListener
+            if (playing?.url == ch.url && player != null) enterFullscreen()
+            else play(shown, pos)
+        }
+        list.setOnItemLongClickListener { _, _, pos, _ ->
+            shown.getOrNull(pos)?.let { toggleFav(it) }
+            true
+        }
+        previewBox.setOnClickListener { if (playing != null) enterFullscreen() }
 
         search.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, st: Int, c: Int, a: Int) {}
@@ -99,21 +202,11 @@ class MainActivity : Activity() {
             list.requestFocus()
             true
         }
-        list.setOnItemClickListener { _, _, pos, _ ->
-            val h = hits
-            if (h != null) {
-                val hit = h.getOrNull(pos) ?: return@setOnItemClickListener
-                sec = hit.first
-                play(hit.second)
-                search.setText("")
-            } else {
-                sec = browse
-                play(pos)
-            }
-            hideKeyboard()
-            hidePanel()
-        }
-        loadChannels()
+
+        fav = loadFav()
+        showSection(0)
+        loadAll()
+        list.requestFocus()
     }
 
     override fun onStart() {
@@ -127,13 +220,12 @@ class MainActivity : Activity() {
 
             override fun onPlayerError(error: PlaybackException) {
                 spinner.visibility = View.GONE
-                val n = channels.getOrNull(current)?.name ?: ""
-                showOsd("Canal no disponible: $n", 5000)
+                showOsd("Canal no disponible: ${playing?.name ?: ""}", 5000)
             }
         })
         playerView.player = p
         player = p
-        if (current >= 0) play(current)
+        if (playing != null) play(playingList, playingIdx)
     }
 
     override fun onStop() {
@@ -151,49 +243,54 @@ class MainActivity : Activity() {
                 or View.SYSTEM_UI_FLAG_LAYOUT_STABLE)
     }
 
-    // ---------- Canales ----------
+    // ---------- Carga de listas ----------
 
-    private fun loadChannels() {
+    private fun loadAll() {
         thread {
             val extra = resources.openRawResource(R.raw.mis_canales)
                 .bufferedReader().use { it.readText() }
-            val defs = listOf(
-                Pair(getString(R.string.playlist_url), false),
-                Pair(getString(R.string.playlist_movies_url), false),
-                Pair(getString(R.string.playlist_movies_es_url), true)
-            )
-            var canales: List<Channel> = emptyList()
-            val pelis = ArrayList<Channel>()
-            val moviesUrls = HashSet<String>()
-            for ((i, d) in defs.withIndex()) {
-                val cache = File(filesDir, "playlist_$i.m3u")
-                var text: String? = null
-                try {
-                    text = download(d.first)
-                    cache.writeText(text)
-                } catch (e: Exception) {
-                    if (cache.exists()) text = cache.readText()
-                }
-                var items: List<Channel> = if (text != null) parseM3u(text) else emptyList()
-                if (d.second) {
-                    items = items.filter {
-                        it.group.contains("movie", true) || it.group.contains("pel", true)
-                    }.filter { it.url !in moviesUrls }
-                }
-                when (i) {
-                    0 -> canales = parseM3u(extra) + items
-                    1 -> {
-                        pelis.addAll(items)
-                        items.forEach { moviesUrls.add(it.url) }
+            for ((i, src) in sources.withIndex()) {
+                val all = ArrayList<Channel>()
+                if (i == 0) all.addAll(parseM3u(extra))
+                for ((j, u) in src.urls.withIndex()) {
+                    val cache = File(filesDir, "pl_${i}_$j.m3u")
+                    var text: String? = null
+                    try {
+                        text = download(u.first)
+                        cache.writeText(text)
+                    } catch (e: Exception) {
+                        if (cache.exists()) text = cache.readText()
                     }
-                    else -> pelis.addAll(items)
+                    var items: List<Channel> = if (text != null) parseM3u(text) else emptyList()
+                    if (u.second) {
+                        items = items.filter {
+                            it.group.contains("movie", true) || it.group.contains("pel", true)
+                        }
+                    }
+                    all.addAll(items)
                 }
+                val res = all.distinctBy { it.url }
+                runOnUiThread { if (!isFinishing) onLoaded(i, res) }
             }
-            val out = listOf(
-                Section(getString(R.string.sec_channels), canales),
-                Section(getString(R.string.sec_movies), pelis)
-            )
-            runOnUiThread { if (!isFinishing) onSections(out) }
+        }
+    }
+
+    private fun onLoaded(i: Int, res: List<Channel>) {
+        data[i] = res
+        if (menuIndex == i) {
+            showSection(i)
+        } else if (menuIndex == searchIdx) {
+            applyQuery(search.text.toString())
+        }
+        if (i == 0) {
+            if (res.isEmpty()) {
+                nowTitle.text = getString(R.string.no_channels)
+            } else if (playing == null) {
+                val last = getSharedPreferences("eva", MODE_PRIVATE).getString("last", null)
+                val k = res.indexOfFirst { it.url == last }
+                play(res, if (k >= 0) k else 0)
+                if (menuIndex == 0) list.setSelection(if (k >= 0) k else 0)
+            }
         }
     }
 
@@ -213,8 +310,10 @@ class MainActivity : Activity() {
     private fun parseM3u(text: String): List<Channel> {
         val out = ArrayList<Channel>()
         val groupRe = Regex("group-title=\"([^\"]*)\"")
+        val logoRe = Regex("tvg-logo=\"([^\"]*)\"")
         var name: String? = null
         var group = ""
+        var logo: String? = null
         var ua: String? = null
         var ref: String? = null
         for (raw in text.lineSequence()) {
@@ -223,6 +322,7 @@ class MainActivity : Activity() {
             if (line.startsWith("#EXTINF")) {
                 name = line.substringAfterLast(",").trim()
                 group = groupRe.find(line)?.groupValues?.get(1) ?: ""
+                logo = logoRe.find(line)?.groupValues?.get(1)?.ifEmpty { null }
                 ua = null
                 ref = null
             } else if (line.startsWith("#EXTVLCOPT:http-user-agent=")) {
@@ -233,8 +333,9 @@ class MainActivity : Activity() {
                 continue
             } else {
                 val n = name
-                if (n != null) out.add(Channel(n, group, line, ua, ref))
+                if (n != null) out.add(Channel(n, group, line, logo, ua, ref))
                 name = null
+                logo = null
                 ua = null
                 ref = null
             }
@@ -242,47 +343,105 @@ class MainActivity : Activity() {
         return out
     }
 
-    private fun onSections(all: List<Section>) {
-        sections = all
-        osd.visibility = View.GONE
-        btnChannels.text = "${all[0].name}  (${all[0].channels.size})"
-        btnMovies.text = if (all[1].channels.isEmpty()) "${all[1].name}  (no disponible)"
-        else "${all[1].name}  (${all[1].channels.size})"
-        if (all[0].channels.isEmpty() && all[1].channels.isEmpty()) {
-            showOsd(getString(R.string.no_channels), 8000)
+    // ---------- Favoritos ----------
+
+    private fun loadFav(): MutableList<Channel> {
+        val raw = getSharedPreferences("eva", MODE_PRIVATE).getString("fav", "") ?: ""
+        val out = ArrayList<Channel>()
+        for (line in raw.lines()) {
+            if (line.isBlank()) continue
+            val p = line.split("\t")
+            if (p.size >= 6) {
+                out.add(
+                    Channel(
+                        p[0], p[1], p[2],
+                        p[3].ifEmpty { null }, p[4].ifEmpty { null }, p[5].ifEmpty { null }
+                    )
+                )
+            }
+        }
+        return out
+    }
+
+    private fun saveFav() {
+        val s = fav.joinToString("\n") {
+            listOf(it.name, it.group, it.url, it.logo ?: "", it.userAgent ?: "", it.referrer ?: "")
+                .joinToString("\t")
+        }
+        getSharedPreferences("eva", MODE_PRIVATE).edit().putString("fav", s).apply()
+    }
+
+    private fun toggleFav(ch: Channel) {
+        val k = fav.indexOfFirst { it.url == ch.url }
+        if (k >= 0) {
+            fav.removeAt(k)
+            showOsd("Quitado de favoritos", 2000)
+        } else {
+            fav.add(ch)
+            showOsd("Agregado a favoritos", 2000)
+        }
+        saveFav()
+        if (menuIndex == favIdx) {
+            val pos = list.selectedItemPosition
+            showSection(favIdx)
+            list.setSelection(if (pos >= 0) minOf(pos, maxOf(shown.size - 1, 0)) else 0)
+        } else {
+            refreshRows()
         }
     }
 
-    private fun refreshList() {
-        val sc = sections.getOrNull(browse) ?: return
-        list.adapter = ArrayAdapter(this, R.layout.item_channel, sc.channels.map { it.name })
-        sectionTitle.text = sc.name
-    }
+    // ---------- Menu y lista ----------
 
-    // ---------- Busqueda ----------
+    private fun showSection(idx: Int) {
+        menuIndex = idx
+        menu.setItemChecked(idx, true)
+        val searching = idx == searchIdx
+        search.visibility = if (searching) View.VISIBLE else View.GONE
+        if (!searching && search.text.isNotEmpty()) search.setText("")
+        when {
+            idx < sources.size -> {
+                shown = data[idx] ?: emptyList()
+                listTitle.text =
+                    if (data.containsKey(idx)) labels[idx] else labels[idx] + "  (cargando…)"
+            }
+            idx == favIdx -> {
+                shown = fav.toList()
+                listTitle.text =
+                    if (fav.isEmpty()) "Favoritos (vacío)\nUsa Menú u OK largo en un canal" else "Favoritos"
+            }
+            else -> {
+                applyQuery(search.text.toString())
+                return
+            }
+        }
+        list.adapter = ChannelAdapter(shown)
+    }
 
     private fun norm(s: String): String =
         Normalizer.normalize(s, Normalizer.Form.NFD).replace(Regex("\\p{M}+"), "").lowercase()
 
     private fun applyQuery(q: String) {
+        if (menuIndex != searchIdx) return
         val t = norm(q.trim())
         if (t.isEmpty()) {
-            hits = null
-            refreshList()
-            return
-        }
-        val out = ArrayList<Pair<Int, Int>>()
-        for ((si, sc) in sections.withIndex()) {
-            for ((ci, ch) in sc.channels.withIndex()) {
-                if (norm(ch.name).contains(t)) out.add(Pair(si, ci))
+            shown = emptyList()
+            listTitle.text = "Buscar en todo"
+        } else {
+            val out = ArrayList<Channel>()
+            val seen = HashSet<String>()
+            for (k in data.keys.sorted()) {
+                for (ch in data[k] ?: emptyList()) {
+                    if (norm(ch.name).contains(t) && seen.add(ch.url)) out.add(ch)
+                }
             }
+            shown = out
+            listTitle.text = "Resultados (${out.size})"
         }
-        hits = out
-        val names = out.map {
-            "${sections[it.first].channels[it.second].name}  ·  ${sections[it.first].name}"
-        }
-        list.adapter = ArrayAdapter(this, R.layout.item_channel, names)
-        sectionTitle.text = "Resultados (${out.size})"
+        list.adapter = ChannelAdapter(shown)
+    }
+
+    private fun refreshRows() {
+        (list.adapter as? BaseAdapter)?.notifyDataSetChanged()
     }
 
     private fun hideKeyboard() {
@@ -290,15 +449,34 @@ class MainActivity : Activity() {
         imm.hideSoftInputFromWindow(search.windowToken, 0)
     }
 
+    inner class ChannelAdapter(private val items: List<Channel>) : BaseAdapter() {
+        override fun getCount() = items.size
+        override fun getItem(position: Int) = items[position]
+        override fun getItemId(position: Int) = position.toLong()
+        override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+            val v = convertView ?: layoutInflater.inflate(R.layout.item_channel, parent, false)
+            val ch = items[position]
+            val star = if (fav.any { it.url == ch.url }) "★ " else ""
+            val mark = if (playing?.url == ch.url) "► " else ""
+            v.findViewById<TextView>(R.id.name).text = mark + star + ch.name
+            Logos.load(v.findViewById(R.id.logo), ch.logo)
+            return v
+        }
+    }
+
     // ---------- Reproduccion ----------
 
-    private fun play(i: Int) {
-        val l = channels
+    private fun play(l: List<Channel>, idx: Int) {
         if (l.isEmpty()) return
-        val idx = ((i % l.size) + l.size) % l.size
-        current = idx
-        val ch = l[idx]
-        showOsd("${idx + 1}  ${ch.name}", 3000)
+        val i = ((idx % l.size) + l.size) % l.size
+        val ch = l[i]
+        playingList = l
+        playingIdx = i
+        playing = ch
+        getSharedPreferences("eva", MODE_PRIVATE).edit().putString("last", ch.url).apply()
+        nowTitle.text = ch.name
+        showOsd(ch.name, 3000)
+        refreshRows()
 
         val p = player ?: return
         val ds = DefaultHttpDataSource.Factory().setAllowCrossProtocolRedirects(true)
@@ -317,96 +495,75 @@ class MainActivity : Activity() {
         handler.postDelayed(hideOsd, ms)
     }
 
-    // ---------- Menus y control remoto ----------
-
-    private fun showHome() {
-        panel.visibility = View.GONE
-        home.visibility = View.VISIBLE
-        (if (sec == 0) btnChannels else btnMovies).requestFocus()
+    private fun enterFullscreen() {
+        fullscreen = true
+        menuPane.visibility = View.GONE
+        listPane.visibility = View.GONE
+        nowTitle.visibility = View.GONE
+        nowHint.visibility = View.GONE
+        centerPane.setPadding(0, 0, 0, 0)
+        previewBox.requestFocus()
+        hideKeyboard()
+        showOsd(playing?.name ?: "", 3000)
     }
 
-    private fun openSection(i: Int) {
-        if (sections.isEmpty()) {
-            showOsd(getString(R.string.loading), 2000)
-            return
-        }
-        browse = i
-        search.setText("")
-        refreshList()
-        home.visibility = View.GONE
-        panel.visibility = View.VISIBLE
-        cameFromHome = true
+    private fun exitFullscreen() {
+        fullscreen = false
+        val pad = (16 * resources.displayMetrics.density).toInt()
+        centerPane.setPadding(pad, pad, pad, pad)
+        menuPane.visibility = View.VISIBLE
+        listPane.visibility = View.VISIBLE
+        nowTitle.visibility = View.VISIBLE
+        nowHint.visibility = View.VISIBLE
         list.requestFocus()
-        list.post { list.setSelection(if (browse == sec && current >= 0) current else 0) }
+        val k = shown.indexOfFirst { it.url == playing?.url }
+        if (k >= 0) list.setSelection(k)
     }
 
-    private fun showPanel() {
-        browse = sec
-        search.setText("")
-        refreshList()
-        panel.visibility = View.VISIBLE
-        cameFromHome = false
-        list.requestFocus()
-        list.post { if (current >= 0) list.setSelection(current) }
-    }
-
-    private fun hidePanel() {
-        panel.visibility = View.GONE
-    }
+    // ---------- Control remoto ----------
 
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
         when {
-            panel.visibility == View.VISIBLE -> {
-                hideKeyboard()
-                hidePanel()
-                if (cameFromHome) showHome()
-            }
-            home.visibility == View.VISIBLE -> {
-                if (current >= 0) home.visibility = View.GONE else super.onBackPressed()
-            }
+            fullscreen -> exitFullscreen()
+            !menu.hasFocus() -> menu.requestFocus()
             else -> super.onBackPressed()
         }
     }
 
     override fun dispatchKeyEvent(e: KeyEvent): Boolean {
         if (e.action != KeyEvent.ACTION_DOWN) return super.dispatchKeyEvent(e)
-        if (e.keyCode == KeyEvent.KEYCODE_SEARCH) {
-            if (home.visibility == View.VISIBLE) openSection(0)
-            else if (panel.visibility != View.VISIBLE) showPanel()
-            search.requestFocus()
-            return true
-        }
-        if (panel.visibility == View.VISIBLE) {
-            if (e.keyCode == KeyEvent.KEYCODE_MENU) {
-                hideKeyboard()
-                showHome()
-                return true
+        if (fullscreen) {
+            when (e.keyCode) {
+                KeyEvent.KEYCODE_DPAD_CENTER,
+                KeyEvent.KEYCODE_ENTER,
+                KeyEvent.KEYCODE_DPAD_LEFT,
+                KeyEvent.KEYCODE_MENU -> {
+                    exitFullscreen()
+                    return true
+                }
+                KeyEvent.KEYCODE_DPAD_UP,
+                KeyEvent.KEYCODE_CHANNEL_UP -> {
+                    play(playingList, playingIdx + 1)
+                    return true
+                }
+                KeyEvent.KEYCODE_DPAD_DOWN,
+                KeyEvent.KEYCODE_CHANNEL_DOWN -> {
+                    play(playingList, playingIdx - 1)
+                    return true
+                }
             }
             return super.dispatchKeyEvent(e)
         }
-        if (home.visibility == View.VISIBLE) return super.dispatchKeyEvent(e)
-        when (e.keyCode) {
-            KeyEvent.KEYCODE_DPAD_CENTER,
-            KeyEvent.KEYCODE_ENTER,
-            KeyEvent.KEYCODE_DPAD_LEFT -> {
-                showPanel()
-                return true
-            }
-            KeyEvent.KEYCODE_MENU -> {
-                showHome()
-                return true
-            }
-            KeyEvent.KEYCODE_DPAD_UP,
-            KeyEvent.KEYCODE_CHANNEL_UP -> {
-                play(current + 1)
-                return true
-            }
-            KeyEvent.KEYCODE_DPAD_DOWN,
-            KeyEvent.KEYCODE_CHANNEL_DOWN -> {
-                play(current - 1)
-                return true
-            }
+        if (e.keyCode == KeyEvent.KEYCODE_SEARCH) {
+            showSection(searchIdx)
+            search.requestFocus()
+            return true
+        }
+        if (e.keyCode == KeyEvent.KEYCODE_MENU && list.hasFocus()) {
+            val pos = list.selectedItemPosition
+            shown.getOrNull(pos)?.let { toggleFav(it) }
+            return true
         }
         return super.dispatchKeyEvent(e)
     }

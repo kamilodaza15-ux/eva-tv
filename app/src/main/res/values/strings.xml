@@ -1,15 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- Nombre de tu TV (sale en el launcher y en el menu de canales) -->
+    <!-- Nombre de tu TV (sale en el launcher) -->
     <string name="app_name">EVA TV</string>
     <!-- Lista de canales de Colombia (iptv-org). Cambiala si quieres otra lista -->
     <string name="playlist_url" translatable="false">https://iptv-org.github.io/iptv/countries/co.m3u</string>
-    <!-- Listas de peliculas (iptv-org). Cambialas si quieres otras -->
-    <string name="playlist_movies_url" translatable="false">https://iptv-org.github.io/iptv/categories/movies.m3u</string>
-    <string name="playlist_movies_es_url" translatable="false">https://iptv-org.github.io/iptv/languages/spa.m3u</string>
-    <string name="sec_channels">Canales</string>
-    <string name="sec_movies">Películas</string>
-    <string name="sec_movies_es">Películas (español)</string>
     <string name="loading">Cargando canales…</string>
     <string name="no_channels">No se pudieron cargar los canales. Revisa el internet del TV.</string>
 </resources>
