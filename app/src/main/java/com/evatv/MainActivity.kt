@@ -47,7 +47,12 @@ data class Channel(
     val userAgent: String?,
     val referrer: String?,
     val tvgId: String? = null
-)
+) {
+    /** Nombre sin tildes ni mayusculas, calculado una sola vez (para buscar rapido). */
+    val key: String by lazy {
+        Normalizer.normalize(name, Normalizer.Form.NFD).replace(Regex("\\p{M}+"), "").lowercase()
+    }
+}
 
 /** Una seccion del menu: nombre y sus listas (url, filtrar solo peliculas). */
 data class Src(val name: String, val urls: List<Pair<String, Boolean>>)
@@ -148,6 +153,8 @@ class MainActivity : Activity() {
     private var playingList: List<Channel> = emptyList()
     private var playingIdx = 0
     private var fullscreen = false
+    private var pendingMenu: Runnable? = null
+    private var pendingSearch: Runnable? = null
     private val handler = Handler(Looper.getMainLooper())
     private val hideOsd = Runnable { osd.visibility = View.GONE }
 
@@ -173,12 +180,18 @@ class MainActivity : Activity() {
         menu.adapter = ArrayAdapter(this, R.layout.item_menu, labels)
         menu.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(p: AdapterView<*>?, v: View?, pos: Int, id: Long) {
-                if (menu.hasFocus()) showSection(pos)
+                if (!menu.hasFocus()) return
+                menu.setItemChecked(pos, true)
+                pendingMenu?.let { handler.removeCallbacks(it) }
+                val r = Runnable { showSection(pos) }
+                pendingMenu = r
+                handler.postDelayed(r, 250)
             }
 
             override fun onNothingSelected(p: AdapterView<*>?) {}
         }
         menu.setOnItemClickListener { _, _, pos, _ ->
+            pendingMenu?.let { handler.removeCallbacks(it) }
             showSection(pos)
             if (pos == searchIdx) search.requestFocus() else list.requestFocus()
         }
@@ -203,7 +216,11 @@ class MainActivity : Activity() {
             override fun beforeTextChanged(s: CharSequence?, st: Int, c: Int, a: Int) {}
             override fun onTextChanged(s: CharSequence?, st: Int, b: Int, c: Int) {}
             override fun afterTextChanged(s: Editable?) {
-                applyQuery(s?.toString() ?: "")
+                val q = s?.toString() ?: ""
+                pendingSearch?.let { handler.removeCallbacks(it) }
+                val r = Runnable { applyQuery(q) }
+                pendingSearch = r
+                handler.postDelayed(r, 250)
             }
         })
         search.setOnEditorActionListener { _, _, _ ->
@@ -234,6 +251,7 @@ class MainActivity : Activity() {
         })
         playerView.player = p
         player = p
+        applyQuality()
         if (playing != null) play(playingList, playingIdx)
     }
 
@@ -476,7 +494,7 @@ class MainActivity : Activity() {
             for (k in data.keys.sorted()) {
                 for (ch in data[k] ?: emptyList()) {
                     if (ch.url.isEmpty()) continue
-                    if (norm(ch.name).contains(t) && seen.add(ch.url)) out.add(ch)
+                    if (ch.key.contains(t) && seen.add(ch.url)) out.add(ch)
                 }
             }
             shown = out
@@ -548,6 +566,14 @@ class MainActivity : Activity() {
         p.playWhenReady = true
     }
 
+    /** Ventana chica: 540p max (mas fluido). Pantalla completa: sin limite. */
+    private fun applyQuality() {
+        val p = player ?: return
+        val b = p.trackSelectionParameters.buildUpon()
+        if (fullscreen) b.clearVideoSizeConstraints() else b.setMaxVideoSize(960, 540)
+        p.trackSelectionParameters = b.build()
+    }
+
     private fun showOsd(msg: String, ms: Long) {
         osd.text = msg
         osd.visibility = View.VISIBLE
@@ -557,6 +583,7 @@ class MainActivity : Activity() {
 
     private fun enterFullscreen() {
         fullscreen = true
+        applyQuality()
         menuPane.visibility = View.GONE
         listPane.visibility = View.GONE
         nowTitle.visibility = View.GONE
@@ -568,6 +595,7 @@ class MainActivity : Activity() {
 
     private fun exitFullscreen() {
         fullscreen = false
+        applyQuality()
         val pad = (12 * resources.displayMetrics.density).toInt()
         centerPane.setPadding(pad, pad, pad, pad)
         menuPane.visibility = View.VISIBLE
@@ -620,6 +648,9 @@ class MainActivity : Activity() {
             return true
         }
         if (menu.hasFocus() && e.keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) {
+            pendingMenu?.let { handler.removeCallbacks(it) }
+            val sel = menu.selectedItemPosition
+            if (sel >= 0 && sel != menuIndex) showSection(sel)
             if (menuIndex == searchIdx) search.requestFocus() else list.requestFocus()
             return true
         }
